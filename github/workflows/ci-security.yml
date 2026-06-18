@@ -1,0 +1,175 @@
+name: CI - Build, Scan, Sign & SBOM
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}   # ghcr.io/klebercabral/dockerfile-app
+  TRIVY_VERSION: '0.71.1'
+  DOCKLE_VERSION: '0.4.15'
+  COSIGN_VERSION: 'v2.4.1'  # cosign-installer v4 também instala v3+; troque se preferir migrar
+
+permissions:
+  contents: read
+
+jobs:
+  build-scan-sign:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image tags
+        id: vars
+        run: |
+          SHA_SHORT=$(git rev-parse --short HEAD)
+          echo "sha_short=${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "image_lower=$(echo "${REGISTRY}/${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Build image (local, não publicada ainda)
+        run: |
+          docker build -t "${{ steps.vars.outputs.image_lower }}:${{ steps.vars.outputs.sha_short }}" .
+
+      - name: Install Dockle
+        run: |
+          curl -fsSL -o dockle.tar.gz \
+            "https://github.com/goodwithtech/dockle/releases/download/v${DOCKLE_VERSION}/dockle_${DOCKLE_VERSION}_Linux-64bit.tar.gz"
+          tar zxf dockle.tar.gz dockle
+          sudo mv dockle /usr/local/bin/dockle
+          dockle --version
+
+      - name: Dockle - CIS Docker Benchmark
+        run: |
+          IMAGE="${{ steps.vars.outputs.image_lower }}:${{ steps.vars.outputs.sha_short }}"
+          dockle \
+            --exit-code 1 \
+            --exit-level fatal \
+            --format json \
+            --output dockle-report.json \
+            "${IMAGE}"
+
+      - name: Show Dockle report (human-readable)
+        if: always()
+        run: |
+          IMAGE="${{ steps.vars.outputs.image_lower }}:${{ steps.vars.outputs.sha_short }}"
+          dockle --format list "${IMAGE}" || true
+
+      - name: Upload Dockle report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dockle-report
+          path: dockle-report.json
+          if-no-files-found: ignore
+
+      - name: Trivy - Vulnerability scan (CVEs)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: "${{ steps.vars.outputs.image_lower }}:${{ steps.vars.outputs.sha_short }}"
+          version: "v${{ env.TRIVY_VERSION }}"
+          scanners: vuln
+          severity: CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+          format: json
+          output: trivy-vuln-report.json
+
+      - name: Upload Trivy vuln report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-vuln-report
+          path: trivy-vuln-report.json
+          if-no-files-found: ignore
+
+      - name: Trivy - Secret scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: "${{ steps.vars.outputs.image_lower }}:${{ steps.vars.outputs.sha_short }}"
+          version: "v${{ env.TRIVY_VERSION }}"
+          scanners: secret
+          severity: CRITICAL
+          exit-code: '1'
+          format: json
+          output: trivy-secret-report.json
+          skip-setup-trivy: true
+
+      - name: Upload Trivy secret report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-secret-report
+          path: trivy-secret-report.json
+          if-no-files-found: ignore
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image to GHCR
+        if: github.event_name != 'pull_request'
+        id: push
+        run: |
+          IMAGE="${{ steps.vars.outputs.image_lower }}"
+          SHA="${{ steps.vars.outputs.sha_short }}"
+          docker tag "${IMAGE}:${SHA}" "${IMAGE}:latest"
+          docker push "${IMAGE}:${SHA}"
+          docker push "${IMAGE}:latest"
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE}:${SHA}" | cut -d'@' -f2)
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@v4.1.2
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: Sign image with Cosign (keyless)
+        if: github.event_name != 'pull_request'
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          IMAGE="${{ steps.vars.outputs.image_lower }}"
+          DIGEST="${{ steps.push.outputs.digest }}"
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Generate SBOM (CycloneDX)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: "${{ steps.vars.outputs.image_lower }}:${{ steps.vars.outputs.sha_short }}"
+          version: "v${{ env.TRIVY_VERSION }}"
+          format: cyclonedx
+          output: sbom-cyclonedx.json
+          skip-setup-trivy: true
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom-cyclonedx.json
+
+      - name: Attach SBOM as signed attestation
+        if: github.event_name != 'pull_request'
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          IMAGE="${{ steps.vars.outputs.image_lower }}"
+          DIGEST="${{ steps.push.outputs.digest }}"
+          cosign attest --yes \
+            --predicate sbom-cyclonedx.json \
+            --type cyclonedx \
+            "${IMAGE}@${DIGEST}"
