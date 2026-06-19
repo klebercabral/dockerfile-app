@@ -8,10 +8,10 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}   # ghcr.io/klebercabral/dockerfile-app
+  IMAGE_NAME: ${{ github.repository }}
   TRIVY_VERSION: '0.71.1'
   DOCKLE_VERSION: '0.4.15'
-  COSIGN_VERSION: 'v2.4.1'  # cosign-installer v4 também instala v3+; troque se preferir migrar
+  COSIGN_VERSION: 'v2.4.1'
 
 permissions:
   contents: read
@@ -73,7 +73,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Trivy - Vulnerability scan (CVEs)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           image-ref: "${{ steps.vars.outputs.image_lower }}:${{ steps.vars.outputs.sha_short }}"
           version: "v${{ env.TRIVY_VERSION }}"
@@ -93,7 +93,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Trivy - Secret scan
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           image-ref: "${{ steps.vars.outputs.image_lower }}:${{ steps.vars.outputs.sha_short }}"
           version: "v${{ env.TRIVY_VERSION }}"
@@ -148,7 +148,7 @@ jobs:
           cosign sign --yes "${IMAGE}@${DIGEST}"
 
       - name: Generate SBOM (CycloneDX)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           image-ref: "${{ steps.vars.outputs.image_lower }}:${{ steps.vars.outputs.sha_short }}"
           version: "v${{ env.TRIVY_VERSION }}"
