@@ -9,3 +9,4 @@ COPY --from=builder /app/myapp .
 RUN chown -R appuser:appgroup /home/appuser
 USER appuser
 ENTRYPOINT ["./myapp"]
+#TESTE
